@@ -300,7 +300,6 @@ class FreeFormBase(Trainable):
             volume_change = vol_change_dec
 
         latent_log_prob = self._latent_log_prob(z, c)
-
         # Add additional nll terms if requested
         for key, value in list(metrics.items()):
             if key.startswith("vol_change_"):
@@ -323,7 +322,6 @@ class FreeFormBase(Trainable):
             **kwargs
         )
         volume_change = out.surrogate
-
         latent_prob = self._latent_log_prob(out.z, c)
         return LogProbResult(
             out.z, out.x1, latent_prob + volume_change, out.regularizations
@@ -353,7 +351,6 @@ class FreeFormBase(Trainable):
 
         loss_values = {}
         metrics = {}
-
         def check_keys(*keys):
             return any(
                 (loss_key in loss_weights)
@@ -368,7 +365,6 @@ class FreeFormBase(Trainable):
 
         # Empty until computed
         x1 = z = None
-
         # Negative log-likelihood
         if not self.training or (
                 self.hparams.exact_train_nll_every is not None
@@ -537,6 +533,7 @@ class FreeFormBase(Trainable):
             pass
 
     def apply_conditions(self, batch) -> ConditionedBatch:
+        # get conditions and dequantize node features
         x0 = batch[0]
         base_cond_shape = (x0.shape[0], 1)
         device = x0.device
@@ -551,6 +548,7 @@ class FreeFormBase(Trainable):
             conds.append(batch[1])
 
         # SoftFlow
+        # dequantize ordinal and categorical numbers. 
         noise_conds, x, dequantization_jac = self.dequantize(batch)
         conds.extend(noise_conds)
 
@@ -583,7 +581,6 @@ class FreeFormBase(Trainable):
         base_cond_shape = (x0.shape[0], 1)
         device = x0.device
         dtype = x0.dtype
-
         noise = self.hparams.noise
         if isinstance(noise, list):
             min_noise, max_noise = noise

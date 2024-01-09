@@ -139,9 +139,8 @@ class VariationalDequantizer(nn.Module):
     def sample_qu_xh(self, node_mask, edge_mask, x, h):
         net_out = self.net_fn(x, h, node_mask, edge_mask)
         mu, log_sigma = torch.chunk(net_out, chunks=2, dim=-1)
-
-        eps = sample_gaussian_with_mask(mu.size(), mu.device, node_mask)
-        log_q_eps = standard_gaussian_log_likelihood_with_mask(eps, node_mask)
+        eps = sample_gaussian_with_mask(mu.size(), mu.device, node_mask)  # sample gaussian distribution with mu size
+        log_q_eps = standard_gaussian_log_likelihood_with_mask(eps, node_mask) # the sampled noise loglikelihood in gaussian distribution, [B]
 
         assert (mu * (1 - node_mask)).sum() < 1e-5 and \
                (log_sigma * (1 - node_mask)).sum() < 1e-5, \

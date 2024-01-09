@@ -16,7 +16,7 @@ class ENGNNHParams(ModelHParams):
 
     mode: str = "egnn_dynamics"
 
-    hidden_nf: int = 64
+    hidden_nf: int = 16
     n_layers: int = 4
     inv_sublayers: int = 2
     attention: bool = True

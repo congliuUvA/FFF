@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from fff.model.en_graph_utils.egnn import EGNN, GNN
+from fff.model.en_graph_utils.egnn import EGNN, GNN, CLGNN
 from fff.model.en_graph_utils.utils import remove_mean, remove_mean_with_mask
 
 
@@ -15,8 +15,15 @@ class EGNN_dynamics_QM9(nn.Module):
         self.mode = mode
         h_dim = max(1, in_node_nf + context_node_nf)
         if mode == 'egnn_dynamics':
-            self.egnn = EGNN(
-                in_node_nf=h_dim, in_edge_nf=1,
+            # self.egnn = EGNN(
+            #     in_node_nf=h_dim, in_edge_nf=1,
+            #     hidden_nf=hidden_nf, device=device, act_fn=act_fn,
+            #     n_layers=n_layers, attention=attention, tanh=tanh, norm_constant=norm_constant,
+            #     inv_sublayers=inv_sublayers, sin_embedding=sin_embedding,
+            #     normalization_factor=normalization_factor,
+            #     aggregation_method=aggregation_method)
+            self.egnn = CLGNN(
+                in_node_nf=in_node_nf + context_node_nf, in_edge_nf=1,
                 hidden_nf=hidden_nf, device=device, act_fn=act_fn,
                 n_layers=n_layers, attention=attention, tanh=tanh, norm_constant=norm_constant,
                 inv_sublayers=inv_sublayers, sin_embedding=sin_embedding,
