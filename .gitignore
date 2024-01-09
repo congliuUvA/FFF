@@ -1,6 +1,6 @@
 lightning_logs*/
 benchmark/pythae_benchmarks
-
+data/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
