@@ -18,11 +18,11 @@ class EGNN_output_h(nn.Module):
                          n_layers=n_layers,  # recurrent=recurrent, -- seems to be automatic
                          attention=attention,
                          out_node_nf=out_node_nf, aggregation_method=agg)
-        # self.egnn = CEGNN(
-        #     in_node_nf=in_node_nf, in_edge_nf=0,
-        #     hidden_nf=16, device=device, act_fn=act_fn,
-        #     n_layers=n_layers, out_node_nf=out_node_nf,
-        #     aggregation_method=agg)
+        self.egnn = CEGNN(
+            in_node_nf=in_node_nf, in_edge_nf=0,
+            hidden_nf=hidden_nf, device=device, act_fn=act_fn,
+            n_layers=2, out_node_nf=out_node_nf,
+            aggregation_method=agg)
 
         self.in_node_nf = in_node_nf
         self.out_node_nf = out_node_nf

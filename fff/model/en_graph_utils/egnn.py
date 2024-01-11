@@ -1258,7 +1258,7 @@ class CliffordEquivariantUpdate(nn.Module):
         agg_cov = cl_split(agg_cov)
         agg_cov[:, :, 0] = agg_cov[:, :, 0] + agg_inv
         h_update = self.h_update_mlp(torch.cat((agg_cov[..., 0], h), dim=-1))
-        coord = self.pos_update_model(agg_cov)[:, 0, 1:4]
+        coord = coord + self.pos_update_model(agg_cov)[:, 0, 1:4]
         
         return h_update, coord
 
@@ -1269,12 +1269,52 @@ class CliffordEquivariantUpdate(nn.Module):
             h = h * node_mask
         return h, coord
 
-
 class EquivariantBlock(nn.Module):
     def __init__(self, hidden_nf, edge_feat_nf=2, device='cpu', act_fn=nn.SiLU(), n_layers=2, attention=True,
                  norm_diff=True, tanh=False, coords_range=15, norm_constant=1, sin_embedding=None,
                  normalization_factor=100, aggregation_method='sum'):
         super(EquivariantBlock, self).__init__()
+        self.hidden_nf = hidden_nf
+        self.device = device
+        self.n_layers = n_layers
+        self.coords_range_layer = float(coords_range)
+        self.norm_diff = norm_diff
+        self.norm_constant = norm_constant
+        self.sin_embedding = sin_embedding
+        self.normalization_factor = normalization_factor
+        self.aggregation_method = aggregation_method
+
+        for i in range(0, n_layers):
+            self.add_module("gcl_%d" % i, GCL(self.hidden_nf, self.hidden_nf, self.hidden_nf, edges_in_d=edge_feat_nf,
+                                              act_fn=act_fn, attention=attention,
+                                              normalization_factor=self.normalization_factor,
+                                              aggregation_method=self.aggregation_method))
+        self.add_module("gcl_equiv", EquivariantUpdate(hidden_nf, edges_in_d=edge_feat_nf,
+                                                       normalization_factor=self.normalization_factor,
+                                                       aggregation_method=self.aggregation_method))
+        self.to(self.device)
+
+    def forward(self, h, x, edge_index, node_mask=None, edge_mask=None, edge_attr=None):
+        # Edit Emiel: Remove velocity as input
+        distances, coord_diff = coord2diff(x, edge_index, self.norm_constant)
+        if self.sin_embedding is not None:
+            distances = self.sin_embedding(distances)
+        edge_attr = torch.cat([distances, edge_attr], dim=1)
+        for i in range(0, self.n_layers):
+            h, _ = self._modules["gcl_%d" % i](h, edge_index, edge_attr=edge_attr, node_mask=node_mask,
+                                               edge_mask=edge_mask)
+        x = self._modules["gcl_equiv"](h, x, edge_index, coord_diff, edge_attr, node_mask, edge_mask)
+
+        # Important, the bias of the last linear might be non-zero
+        if node_mask is not None:
+            h = h * node_mask
+        return h, x
+
+class CliffordEquivariantBlock(nn.Module):
+    def __init__(self, hidden_nf, edge_feat_nf=2, device='cpu', act_fn=nn.SiLU(), n_layers=2, attention=True,
+                 norm_diff=True, tanh=False, coords_range=15, norm_constant=1, sin_embedding=None,
+                 normalization_factor=100, aggregation_method='sum'):
+        super(CliffordEquivariantBlock, self).__init__()
         self.hidden_nf = hidden_nf
         self.device = device
         self.n_layers = n_layers
@@ -1389,7 +1429,7 @@ class CEGNN(nn.Module):
         self.embedding = nn.Linear(in_node_nf, self.hidden_nf)
         self.embedding_out = nn.Linear(self.hidden_nf, out_node_nf)
         for i in range(0, n_layers):
-            self.add_module("e_block_%d" % i, EquivariantBlock(
+            self.add_module("e_block_%d" % i, CliffordEquivariantBlock(
                 hidden_nf, edge_feat_nf=edge_feat_nf, device=device,
                 act_fn=act_fn, n_layers=inv_sublayers,
                 attention=attention, norm_diff=norm_diff, tanh=tanh,
