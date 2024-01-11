@@ -71,7 +71,6 @@ def load_qm9_dataset(
 ):
     from fff.data.qm9.data.utils import initialize_datasets
     from fff.data.qm9.dataset import filter_atoms
-
     datasets, num_species, charge_scale = initialize_datasets(
         datadir=root, dataset="qm9",
         subtract_thermo=subtract_thermo,

@@ -105,7 +105,6 @@ def initialize_datasets(datadir, dataset, subset=None, splits=None,
             dataset['positions'] = new_positions
             dataset['charges'] = new_charges
             dataset['num_atoms'] = torch.sum(dataset['charges'] > 0, dim=1)
-
     # Get a list of all species across the entire dataset
     all_species = _get_species(datasets, ignore_check=False)
 

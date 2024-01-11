@@ -3,7 +3,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from fff.data.qm9.losses import sum_except_batch
-from fff.model.en_graph_utils.egnn import EGNN, CLGNN
+from fff.model.en_graph_utils.egnn import EGNN, CEGNN
 from fff.model.en_graph_utils.position_feature_prior import assert_correctly_masked, sample_gaussian_with_mask, \
     standard_gaussian_log_likelihood_with_mask
 
@@ -13,16 +13,16 @@ class EGNN_output_h(nn.Module):
                  act_fn=torch.nn.SiLU(), n_layers=4, recurrent=True,
                  attention=False, agg='sum'):
         super().__init__()
-        # self.egnn = EGNN(in_node_nf=in_node_nf, in_edge_nf=0,
-        #                  hidden_nf=hidden_nf, device=device, act_fn=act_fn,
-        #                  n_layers=n_layers,  # recurrent=recurrent, -- seems to be automatic
-        #                  attention=attention,
-        #                  out_node_nf=out_node_nf, aggregation_method=agg)
-        self.egnn = CLGNN(
-            in_node_nf=in_node_nf, in_edge_nf=0,
-            hidden_nf=16, device=device, act_fn=act_fn,
-            n_layers=n_layers, out_node_nf=out_node_nf,
-            aggregation_method=agg)
+        self.egnn = EGNN(in_node_nf=in_node_nf, in_edge_nf=0,
+                         hidden_nf=hidden_nf, device=device, act_fn=act_fn,
+                         n_layers=n_layers,  # recurrent=recurrent, -- seems to be automatic
+                         attention=attention,
+                         out_node_nf=out_node_nf, aggregation_method=agg)
+        # self.egnn = CEGNN(
+        #     in_node_nf=in_node_nf, in_edge_nf=0,
+        #     hidden_nf=16, device=device, act_fn=act_fn,
+        #     n_layers=n_layers, out_node_nf=out_node_nf,
+        #     aggregation_method=agg)
 
         self.in_node_nf = in_node_nf
         self.out_node_nf = out_node_nf
@@ -125,7 +125,8 @@ def transform_to_argmax_partition(onehot, u, node_mask):
     T = (onehot * u).sum(-1, keepdim=True)
     z = onehot * u + node_mask * (1 - onehot) * (T - F.softplus(T - u))
     ldj = (1 - onehot) * F.logsigmoid(T - u) * node_mask
-
+    z = z * node_mask
+    ldj = ldj * node_mask
     assert_correctly_masked(z, node_mask)
     assert_correctly_masked(ldj, node_mask)
 

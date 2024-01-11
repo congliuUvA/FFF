@@ -29,7 +29,6 @@ class PositionFeaturePrior:
         assert len(node_mask.size()) == 3
         assert node_mask.size()[:2] == z_x.size()[:2]
         assert z_h.shape[-1] == self.n_one_hot + self.n_charges
-
         assert (z_x * (1 - node_mask)).sum() < 1e-8 and \
                (z_h * (1 - node_mask)).sum() < 1e-8, \
             'These variables should be properly masked.'
