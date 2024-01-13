@@ -23,7 +23,6 @@ import torch.nn as nn
 from torch import Tensor
 from torch_geometric.data import Data
 from torch_geometric.nn import MessagePassing
-from torch_scatter import scatter
 
 class CosineCutoff(nn.Module):
     
