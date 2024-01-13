@@ -32,8 +32,8 @@ latent_distribution:
 batch_size: 64
 optimizer:
   name: adam
-  lr: 0.001
+  lr: 0.0003
 max_epochs: 800 # stop after 700 epochs and restart with learning rate scheduler
 
 accelerator: "gpu"
-num_workers: 0
+num_workers: 16

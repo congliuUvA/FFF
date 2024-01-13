@@ -13,15 +13,15 @@ class EGNN_output_h(nn.Module):
                  act_fn=torch.nn.SiLU(), n_layers=4, recurrent=True,
                  attention=False, agg='sum'):
         super().__init__()
-        self.egnn = EGNN(in_node_nf=in_node_nf, in_edge_nf=0,
-                         hidden_nf=hidden_nf, device=device, act_fn=act_fn,
-                         n_layers=n_layers,  # recurrent=recurrent, -- seems to be automatic
-                         attention=attention,
-                         out_node_nf=out_node_nf, aggregation_method=agg)
+        # self.egnn = EGNN(in_node_nf=in_node_nf, in_edge_nf=0,
+        #                  hidden_nf=hidden_nf, device=device, act_fn=act_fn,
+        #                  n_layers=n_layers,  # recurrent=recurrent, -- seems to be automatic
+        #                  attention=attention,
+        #                  out_node_nf=out_node_nf, aggregation_method=agg)
         self.egnn = CEGNN(
             in_node_nf=in_node_nf, in_edge_nf=0,
             hidden_nf=hidden_nf, device=device, act_fn=act_fn,
-            n_layers=2, out_node_nf=out_node_nf,
+            n_layers=1, out_node_nf=out_node_nf,
             aggregation_method=agg)
 
         self.in_node_nf = in_node_nf

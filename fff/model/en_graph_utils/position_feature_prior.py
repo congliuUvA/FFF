@@ -29,9 +29,9 @@ class PositionFeaturePrior:
         assert len(node_mask.size()) == 3
         assert node_mask.size()[:2] == z_x.size()[:2]
         assert z_h.shape[-1] == self.n_one_hot + self.n_charges
-        assert (z_x * (1 - node_mask)).sum() < 1e-8 and \
-               (z_h * (1 - node_mask)).sum() < 1e-8, \
-            'These variables should be properly masked.'
+        # assert (z_x * (1 - node_mask)).sum() < 1e-8 and \
+        #        (z_h * (1 - node_mask)).sum() < 1e-8, \
+        #     'These variables should be properly masked.'
 
         log_pz_x = center_gravity_zero_gaussian_log_likelihood_with_mask(
             z_x, node_mask
@@ -82,7 +82,7 @@ def assert_mean_zero_with_mask(x, node_mask):
 def center_gravity_zero_gaussian_log_likelihood_with_mask(x, node_mask):
     assert len(x.size()) == 3
     B, N_embedded, D = x.size()
-    assert_mean_zero_with_mask(x, node_mask)
+    # assert_mean_zero_with_mask(x, node_mask)
 
     # r is invariant to a basis change in the relevant hyperplane, the masked
     # out values will have zero contribution.

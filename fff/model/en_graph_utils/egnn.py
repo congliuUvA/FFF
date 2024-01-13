@@ -1220,9 +1220,8 @@ class CliffordEquivariantUpdate(nn.Module):
         self.algebra = CliffordAlgebra((1,1,1))
         input_edge = hidden_nf * 2 + edges_in_d
         self.pos_embedding = MVLinear(self.algebra, 1, hidden_nvf, subspaces=False)
-        self.pos_edge_model = CEMLP(self.algebra, 2*hidden_nvf, hidden_nvf, hidden_nvf)
-        # self.pos_update_model = CEMLP(self.algebra, hidden_nvf, hidden_nvf, 1)
-        self.pos_update_model = MVLinear(self.algebra, hidden_nvf, 1)
+        self.pos_edge_model = CEMLP(self.algebra, hidden_nvf, hidden_nvf, hidden_nvf)
+        self.pos_update_model = MVLinear(self.algebra, hidden_nvf, hidden_nvf)
         self.coord_mlp = self.coord_mlp = nn.Sequential(
             nn.Linear(input_edge, hidden_nf),
             nn.SiLU(),
@@ -1236,13 +1235,10 @@ class CliffordEquivariantUpdate(nn.Module):
         self.normalization_factor = normalization_factor
         self.aggregation_method = aggregation_method
 
-    def coord_model(self, h, coord, edge_index, coord_diff, edge_attr, edge_mask):
+    def coord_model(self, h, coord, edge_index, edge_attr, edge_mask):
         row, col = edge_index
-        pos = self.algebra.embed_grade(coord.unsqueeze(1), 1)
-        pos = self.pos_embedding(pos)
-        input_cov_tensor = torch.cat([pos[row], pos[col]], dim=1)
+        input_cov_tensor = coord[row] - coord[col]
         input_inv_tensor = torch.cat([h[row], h[col], edge_attr], dim=1)
-
         edge_cov_message = self.pos_edge_model(input_cov_tensor)
         edge_inv_message = self.coord_mlp(input_inv_tensor)
         
@@ -1258,14 +1254,14 @@ class CliffordEquivariantUpdate(nn.Module):
         agg_cov = cl_split(agg_cov)
         agg_cov[:, :, 0] = agg_cov[:, :, 0] + agg_inv
         h_update = self.h_update_mlp(torch.cat((agg_cov[..., 0], h), dim=-1))
-        coord = coord + self.pos_update_model(agg_cov)[:, 0, 1:4]
+        coord = coord + self.pos_update_model(agg_cov)
         
         return h_update, coord
 
-    def forward(self, h, coord, edge_index, coord_diff, edge_attr=None, node_mask=None, edge_mask=None):
-        h, coord = self.coord_model(h, coord, edge_index, coord_diff, edge_attr, edge_mask)
+    def forward(self, h, coord, edge_index, edge_attr=None, node_mask=None, edge_mask=None):
+        h, coord = self.coord_model(h, coord, edge_index, edge_attr, edge_mask)
         if node_mask is not None:
-            coord = coord * node_mask
+            coord = cl_split(cl_flatten(coord) * node_mask)
             h = h * node_mask
         return h, coord
 
@@ -1311,10 +1307,11 @@ class EquivariantBlock(nn.Module):
         return h, x
 
 class CliffordEquivariantBlock(nn.Module):
-    def __init__(self, hidden_nf, edge_feat_nf=2, device='cpu', act_fn=nn.SiLU(), n_layers=2, attention=True,
+    def __init__(self, hidden_nf, hidden_nvf=8, edge_feat_nf=2, device='cpu', act_fn=nn.SiLU(), n_layers=2, attention=True,
                  norm_diff=True, tanh=False, coords_range=15, norm_constant=1, sin_embedding=None,
                  normalization_factor=100, aggregation_method='sum'):
         super(CliffordEquivariantBlock, self).__init__()
+        self.algebra = CliffordAlgebra((1,1,1))
         self.hidden_nf = hidden_nf
         self.device = device
         self.n_layers = n_layers
@@ -1330,26 +1327,24 @@ class CliffordEquivariantBlock(nn.Module):
                                               act_fn=act_fn, attention=attention,
                                               normalization_factor=self.normalization_factor,
                                               aggregation_method=self.aggregation_method))
-        self.add_module("gcl_equiv", CliffordEquivariantUpdate(hidden_nf, edges_in_d=edge_feat_nf,
+        self.add_module("gcl_equiv", CliffordEquivariantUpdate(hidden_nf, edges_in_d=edge_feat_nf, hidden_nvf=hidden_nvf,
                                                        normalization_factor=self.normalization_factor,
                                                        aggregation_method=self.aggregation_method))
         self.to(self.device)
 
-    def forward(self, h, x, edge_index, node_mask=None, edge_mask=None, edge_attr=None):
-        # Edit Emiel: Remove velocity as input
-        distances, coord_diff = coord2diff(x, edge_index, self.norm_constant)
-        if self.sin_embedding is not None:
-            distances = self.sin_embedding(distances)
+    def forward(self, h, pos, edge_index, node_mask=None, edge_mask=None, edge_attr=None):
+        row, col = edge_index
+        distances = self.algebra.norm(pos[row] - pos[col]).squeeze()
         edge_attr = torch.cat([distances, edge_attr], dim=1)
         for i in range(0, self.n_layers):
             h, _ = self._modules["gcl_%d" % i](h, edge_index, edge_attr=edge_attr, node_mask=node_mask,
                                                edge_mask=edge_mask)
-        h, x = self._modules["gcl_equiv"](h, x, edge_index, coord_diff, edge_attr, node_mask, edge_mask)
+        _, pos = self._modules["gcl_equiv"](h, pos, edge_index, edge_attr, node_mask, edge_mask)
 
         # Important, the bias of the last linear might be non-zero
         if node_mask is not None:
             h = h * node_mask
-        return h, x
+        return h, pos
 
 
 class EGNN(nn.Module):
@@ -1405,10 +1400,11 @@ class EGNN(nn.Module):
         return h, x
 
 class CEGNN(nn.Module):
-    def __init__(self, in_node_nf, in_edge_nf, hidden_nf, device='cpu', act_fn=nn.SiLU(), n_layers=3, attention=False,
+    def __init__(self, in_node_nf, in_edge_nf, hidden_nf, hidden_nvf=8, device='cpu', act_fn=nn.SiLU(), n_layers=3, attention=False,
                  norm_diff=True, out_node_nf=None, tanh=False, coords_range=15, norm_constant=1, inv_sublayers=2,
                  sin_embedding=False, normalization_factor=100, aggregation_method='sum'):
         super(CEGNN, self).__init__()
+        self.algebra = CliffordAlgebra((1,1,1))
         if out_node_nf is None:
             out_node_nf = in_node_nf
         self.hidden_nf = hidden_nf
@@ -1424,13 +1420,14 @@ class CEGNN(nn.Module):
             edge_feat_nf = self.sin_embedding.dim * 2
         else:
             self.sin_embedding = None
-            edge_feat_nf = 2
-
+            edge_feat_nf = 1 + hidden_nvf
+        self.pos_embedding = MVLinear(self.algebra, in_features=1, out_features=hidden_nvf, subspaces=False)
+        self.pos_embedding_out = MVLinear(self.algebra, in_features=hidden_nvf, out_features=1)
         self.embedding = nn.Linear(in_node_nf, self.hidden_nf)
         self.embedding_out = nn.Linear(self.hidden_nf, out_node_nf)
         for i in range(0, n_layers):
             self.add_module("e_block_%d" % i, CliffordEquivariantBlock(
-                hidden_nf, edge_feat_nf=edge_feat_nf, device=device,
+                hidden_nf, hidden_nvf=hidden_nvf, edge_feat_nf=edge_feat_nf, device=device,
                 act_fn=act_fn, n_layers=inv_sublayers,
                 attention=attention, norm_diff=norm_diff, tanh=tanh,
                 coords_range=coords_range, norm_constant=norm_constant,
@@ -1448,15 +1445,17 @@ class CEGNN(nn.Module):
         if self.sin_embedding is not None:
             distances = self.sin_embedding(distances)
         h = self.embedding(h)
+        pos = self.algebra.embed_grade(x.unsqueeze(1), 1)
+        pos = self.pos_embedding(pos)
         for i in range(0, self.n_layers):
-            h, x = self._modules["e_block_%d" % i](h, x, edge_index, node_mask=node_mask, edge_mask=edge_mask,
+            h, pos = self._modules["e_block_%d" % i](h, pos, edge_index, node_mask=node_mask, edge_mask=edge_mask,
                                                    edge_attr=distances)
 
         # Important, the bias of the last linear might be non-zero
         h = self.embedding_out(h)
         if node_mask is not None:
             h = h * node_mask
-        x = x + x_mean
+        x = pos[..., 0, 1:4] + x_mean
         return h, x
 
 
@@ -1532,7 +1531,7 @@ def unsorted_segment_sum(data, segment_ids, num_segments, normalization_factor, 
     if aggregation_method == 'mean':
         norm = data.new_zeros(result.shape)
         norm.scatter_add_(0, segment_ids, data.new_ones(data.shape))
-        norm[norm == 0] = 1
+        # norm[norm == 0] = 1
         result = result / norm
     return result
 
