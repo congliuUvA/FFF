@@ -3,7 +3,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from fff.data.qm9.losses import sum_except_batch
-from fff.model.en_graph_utils.egnn import EGNN, CEGNN
+from fff.model.en_graph_utils.egnn import EGNN, CEGNN, EGNN_GVP
 from fff.model.en_graph_utils.position_feature_prior import assert_correctly_masked, sample_gaussian_with_mask, \
     standard_gaussian_log_likelihood_with_mask
 
@@ -22,6 +22,11 @@ class EGNN_output_h(nn.Module):
             in_node_nf=in_node_nf, in_edge_nf=0,
             hidden_nf=hidden_nf, device=device, act_fn=act_fn,
             n_layers=1, out_node_nf=out_node_nf,
+            aggregation_method=agg)
+        self.egnn = EGNN_GVP(
+            in_node_nf=in_node_nf, in_edge_nf=0,
+            hidden_nf=hidden_nf, device=device, act_fn=act_fn,
+            n_layers=n_layers, out_node_nf=out_node_nf,
             aggregation_method=agg)
 
         self.in_node_nf = in_node_nf

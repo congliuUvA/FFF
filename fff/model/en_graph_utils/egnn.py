@@ -1252,7 +1252,7 @@ class CliffordEquivariantUpdate(nn.Module):
                                    aggregation_method=self.aggregation_method)
         agg_cov = cl_split(agg_cov)
         agg_cov[:, :, 0] = agg_cov[:, :, 0] + agg_inv
-        h_update = self.h_update_mlp(torch.cat((agg_cov[..., 0], h), dim=-1))
+        h_update = self.h_update_mlp(torch.cat((agg_cov[..., 0], h), dim=-1)) + h
         coord = coord + self.pos_update_model(agg_cov)
         
         return h_update, coord
@@ -1338,7 +1338,7 @@ class CliffordEquivariantBlock(nn.Module):
         for i in range(0, self.n_layers):
             h, _ = self._modules["gcl_%d" % i](h, edge_index, edge_attr=edge_attr, node_mask=node_mask,
                                                edge_mask=edge_mask)
-        _, pos = self._modules["gcl_equiv"](h, pos, edge_index, edge_attr, node_mask, edge_mask)
+        h, pos = self._modules["gcl_equiv"](h, pos, edge_index, edge_attr, node_mask, edge_mask)
 
         # Important, the bias of the last linear might be non-zero
         if node_mask is not None:
@@ -1454,9 +1454,202 @@ class CEGNN(nn.Module):
         h = self.embedding_out(h)
         if node_mask is not None:
             h = h * node_mask
+        pos = self.pos_embedding_out(pos)
         x = pos[..., 0, 1:4] + x_mean
         return h, x
 
+def _norm_no_nan(x, axis=-1, keepdims=False, eps=1e-8, sqrt=True):
+    """
+    L2 norm of tensor clamped above a minimum value `eps`.
+    :param sqrt: if `False`, returns the square of the L2 norm
+    """
+    out = torch.clamp(torch.sum(torch.square(x), axis, keepdims), min=eps)
+    return torch.sqrt(out) if sqrt else out
+
+
+class GVPLinear(nn.Module):
+    """
+    Geometric Vector Perceptron. See manuscript and README.md
+    for more details.
+
+    :param in_dims: tuple (n_scalar, n_vector)
+    :param out_dims: tuple (n_scalar, n_vector)
+    :param h_dim: intermediate number of vector channels, optional
+    :param activations: tuple of functions (scalar_act, vector_act)
+    :param vector_gate: whether to use vector gating.
+                        (vector_act will be used as sigma^+ in vector gating if `True`)
+    """
+
+    def __init__(
+        self,
+        in_dims,
+        out_dims,
+        h_dim=None,
+        activations=(F.relu, torch.sigmoid),
+        vector_gate=False,
+    ):
+        super().__init__()
+        self.si, self.vi = in_dims
+        self.so, self.vo = out_dims
+        self.vector_gate = vector_gate
+        if self.vi:
+            self.h_dim = h_dim or max(self.vi, self.vo)
+            self.wh = nn.Linear(self.vi, self.h_dim, bias=False)
+            self.ws = nn.Linear(self.h_dim + self.si, self.so)
+            if self.vo:
+                self.wv = nn.Linear(self.h_dim, self.vo, bias=False)
+                if self.vector_gate:
+                    self.wsv = nn.Linear(self.so, self.vo)
+        else:
+            self.ws = nn.Linear(self.si, self.so)
+
+        self.scalar_act, self.vector_act = activations
+        self.dummy_param = nn.Parameter(torch.empty(0))
+
+    def forward(self, x):
+        """
+        :param x: tuple (s, V) of `torch.Tensor`,
+                  or (if vectors_in is 0), a single `torch.Tensor`
+        :return: tuple (s, V) of `torch.Tensor`,
+                 or (if vectors_out is 0), a single `torch.Tensor`
+        """
+        if self.vi:
+            s, v = x
+            v = torch.transpose(v, -1, -2)
+            vh = self.wh(v)
+            vn = _norm_no_nan(vh, axis=-2)
+            s = self.ws(torch.cat([s, vn], -1))
+            if self.vo:
+                v = self.wv(vh)
+                v = torch.transpose(v, -1, -2)
+                if self.vector_gate:
+                    if self.vector_act:
+                        gate = self.wsv(self.vector_act(s))
+                    else:
+                        gate = self.wsv(s)
+                    v = v * torch.sigmoid(gate).unsqueeze(-1)
+                elif self.vector_act:
+                    v = v * self.vector_act(_norm_no_nan(v, axis=-1, keepdims=True))
+        else:
+            s = self.ws(x)
+            if self.vo:
+                v = torch.zeros(s.shape[0], self.vo, 3, device=self.dummy_param.device)
+        if self.scalar_act:
+            s = self.scalar_act(s)
+
+        return (s, v) if self.vo else s
+    
+
+class GVPMPNN(nn.Module):
+    def __init__(
+        self,
+        in_features_v,
+        in_features_s,
+        hidden_features,
+        out_features_v,
+        out_features_s
+    ):
+        super().__init__()
+
+        self.edge_model = GVPLinear(
+                        (in_features_s*2, in_features_v*2),
+                        (hidden_features, hidden_features),
+                    )
+
+        self.node_model = GVPLinear(
+                        (hidden_features*2, hidden_features*2),
+                        (out_features_s, out_features_v),
+                    )
+
+    def message(self, x_i, x_j):
+        s_rec, v_rec = x_i[0], x_i[1]
+        s_send, v_send = x_j[0], x_j[1]
+        s_input = torch.cat((s_rec, s_send), dim=-1)
+        v_input = torch.cat((v_rec, v_send), dim=1)
+        input = (s_input, v_input)
+        h_msg = self.edge_model(input)
+        return h_msg
+
+    def update(self, h_agg, h):
+        s_agg, v_agg = h_agg[0], h_agg[1]
+        s, v = h[0], h[1]
+        input_s = torch.cat([s, s_agg], dim=-1)
+        input_v = torch.cat([v, v_agg], dim=1)
+        input = (input_s, input_v)
+        out_h = self.node_model(input)
+
+        out_h_s, out_h_v = h[0] + out_h[0], h[1] + out_h[1]
+        return (out_h_s, out_h_v)
+
+    def forward(self, input, edge_index, node_mask, edge_mask):
+        s, v = input
+        s_send, v_send = s[edge_index[0]], v[edge_index[0]]
+        s_rec, v_rec = s[edge_index[1]], v[edge_index[1]]
+        x_j = (s_send, v_send)
+        x_i = (s_rec, v_rec)
+
+        s_msg, v_msg = self.message(x_i, x_j)
+        if edge_mask is not None:
+            s_msg = s_msg * edge_mask
+            v_msg = (v_msg.reshape(v_msg.shape[0], -1) * edge_mask).reshape(v_msg.shape[0], -1, 3)
+        h_msg = (s_msg, v_msg)
+        h_msg_s = global_add_pool(h_msg[0], edge_index[1])
+        h_msg_v = global_add_pool(h_msg[1].reshape(h_msg[1].shape[0], -1), edge_index[1])
+        h_msg_v = h_msg_v.reshape(h_msg_v.shape[0], -1, 3)
+        h_agg = (h_msg_s, h_msg_v)
+
+        out_s, out_v = self.update(h_agg, input)
+        if node_mask is not None:
+            out_s = out_s * node_mask
+            out_v = (out_v.reshape(out_v.shape[0], -1) * node_mask).reshape(out_v.shape[0], -1, 3)
+        out_h = (out_s, out_v)
+        return out_h
+
+
+class EGNN_GVP(nn.Module):
+    def __init__(self, in_node_nf, in_edge_nf, hidden_nf, device='cpu', act_fn=nn.SiLU(), n_layers=3, attention=False,
+                 norm_diff=True, out_node_nf=None, tanh=False, coords_range=15, norm_constant=1, inv_sublayers=2,
+                 sin_embedding=False, normalization_factor=100, aggregation_method='sum'):
+        super().__init__()
+        if out_node_nf is None:
+            out_node_nf = in_node_nf
+        self.feature_embedding = GVPLinear(
+                (in_node_nf, 1),
+                (hidden_nf, hidden_nf),
+                activations=(None, None),
+            )
+        layers = []
+        for i in range(n_layers):
+            layers.append(
+                GVPMPNN(hidden_nf, hidden_nf, hidden_nf, hidden_nf, hidden_nf)
+            )
+        self.projection = GVPLinear(
+                (hidden_nf, hidden_nf),
+                (out_node_nf, 1),
+                activations=(None, None),
+            )
+
+        self.model = nn.Sequential(*layers)
+
+    def _forward(self, x, edge_index, node_mask=None, edge_mask=None):
+        x = self.feature_embedding(x)
+        for layer in self.model:
+            x = layer(x, edge_index, node_mask, edge_mask)
+        h, pos = self.projection(x)
+        if node_mask is not None:
+            h = h * node_mask
+            pos = pos.squeeze() * node_mask
+        return h, pos
+    
+    def forward(self, h, x, edge_index, node_mask=None, edge_mask=None):
+        x_mean = x.mean(dim=0, keepdim=True)
+        x = x - x_mean
+
+        h, pos = self._forward((h, x.unsqueeze(1)), edge_index, node_mask, edge_mask)
+        pos = pos.squeeze() + x_mean
+
+        return h, pos
+    
 
 class GNN(nn.Module):
     def __init__(self, in_node_nf, in_edge_nf, hidden_nf, aggregation_method='sum', device='cpu',
