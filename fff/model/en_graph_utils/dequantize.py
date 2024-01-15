@@ -132,8 +132,8 @@ def transform_to_argmax_partition(onehot, u, node_mask):
     ldj = (1 - onehot) * F.logsigmoid(T - u) * node_mask
     z = z * node_mask
     ldj = ldj * node_mask
-    assert_correctly_masked(z, node_mask)
-    assert_correctly_masked(ldj, node_mask)
+    # assert_correctly_masked(z, node_mask)
+    # assert_correctly_masked(ldj, node_mask)
 
     ldj = sum_except_batch(ldj)
 

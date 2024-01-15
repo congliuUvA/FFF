@@ -1466,7 +1466,29 @@ def _norm_no_nan(x, axis=-1, keepdims=False, eps=1e-8, sqrt=True):
     out = torch.clamp(torch.sum(torch.square(x), axis, keepdims), min=eps)
     return torch.sqrt(out) if sqrt else out
 
-
+class GVPLayerNorm(nn.Module):
+    '''
+    Combined LayerNorm for tuples (s, V).
+    Takes tuples (s, V) as input and as output.
+    '''
+    def __init__(self, dims):
+        super(GVPLayerNorm, self).__init__()
+        self.s, self.v = dims
+        self.scalar_norm = nn.LayerNorm(self.s)
+        
+    def forward(self, x):
+        '''
+        :param x: tuple (s, V) of `torch.Tensor`,
+                  or single `torch.Tensor` 
+                  (will be assumed to be scalar channels)
+        '''
+        if not self.v:
+            return self.scalar_norm(x)
+        s, v = x
+        vn = _norm_no_nan(v, axis=-1, keepdims=True, sqrt=False)
+        vn = torch.sqrt(torch.mean(vn, dim=-2, keepdim=True))
+        return self.scalar_norm(s), v / vn
+    
 class GVPLinear(nn.Module):
     """
     Geometric Vector Perceptron. See manuscript and README.md
@@ -1545,21 +1567,28 @@ class GVPMPNN(nn.Module):
         self,
         in_features_v,
         in_features_s,
-        hidden_features,
+        hidden_features_s,
+        hidden_features_v,
         out_features_v,
         out_features_s
     ):
         super().__init__()
 
-        self.edge_model = GVPLinear(
+        self.edge_model = nn.Sequential(
+            GVPLinear(
                         (in_features_s*2, in_features_v*2),
-                        (hidden_features, hidden_features),
-                    )
-
-        self.node_model = GVPLinear(
-                        (hidden_features*2, hidden_features*2),
+                        (hidden_features_s, hidden_features_v),
+                    ),
+            GVPLayerNorm((hidden_features_s, hidden_features_v))
+        )
+            
+        self.node_model = nn.Sequential(
+            GVPLinear(
+                        (hidden_features_s*2, hidden_features_v*2),
                         (out_features_s, out_features_v),
-                    )
+                    ),
+            GVPLayerNorm((hidden_features_s, hidden_features_v))
+        )
 
     def message(self, x_i, x_j):
         s_rec, v_rec = x_i[0], x_i[1]
@@ -1597,7 +1626,6 @@ class GVPMPNN(nn.Module):
         h_msg_v = global_add_pool(h_msg[1].reshape(h_msg[1].shape[0], -1), edge_index[1])
         h_msg_v = h_msg_v.reshape(h_msg_v.shape[0], -1, 3)
         h_agg = (h_msg_s, h_msg_v)
-
         out_s, out_v = self.update(h_agg, input)
         if node_mask is not None:
             out_s = out_s * node_mask
@@ -1607,24 +1635,28 @@ class GVPMPNN(nn.Module):
 
 
 class EGNN_GVP(nn.Module):
-    def __init__(self, in_node_nf, in_edge_nf, hidden_nf, device='cpu', act_fn=nn.SiLU(), n_layers=3, attention=False,
+    def __init__(self, in_node_nf, in_edge_nf, hidden_nf, hidden_nvf=32, device='cpu', act_fn=nn.SiLU(), n_layers=3, attention=False,
                  norm_diff=True, out_node_nf=None, tanh=False, coords_range=15, norm_constant=1, inv_sublayers=2,
                  sin_embedding=False, normalization_factor=100, aggregation_method='sum'):
         super().__init__()
         if out_node_nf is None:
             out_node_nf = in_node_nf
-        self.feature_embedding = GVPLinear(
+        self.feature_embedding = nn.Sequential(
+            GVPLinear(
                 (in_node_nf, 1),
-                (hidden_nf, hidden_nf),
+                (hidden_nf, hidden_nvf),
                 activations=(None, None),
-            )
+            ),
+            GVPLayerNorm((hidden_nf, hidden_nvf))
+        )
+        
         layers = []
         for i in range(n_layers):
             layers.append(
-                GVPMPNN(hidden_nf, hidden_nf, hidden_nf, hidden_nf, hidden_nf)
+                GVPMPNN(hidden_nvf, hidden_nf, hidden_nf, hidden_nvf, hidden_nvf, hidden_nf)
             )
         self.projection = GVPLinear(
-                (hidden_nf, hidden_nf),
+                (hidden_nf, hidden_nvf),
                 (out_node_nf, 1),
                 activations=(None, None),
             )

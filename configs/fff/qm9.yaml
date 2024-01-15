@@ -21,7 +21,7 @@ models:
     n_dims: 3
     latent_dim: data
     n_features: 6
-    n_layers: 4
+    n_layers: 6
 
 latent_distribution:
   name: position-feature-prior
@@ -32,7 +32,7 @@ latent_distribution:
 batch_size: 64
 optimizer:
   name: adam
-  lr: 0.0003
+  lr: 0.001
 max_epochs: 800 # stop after 700 epochs and restart with learning rate scheduler
 
 accelerator: "gpu"
