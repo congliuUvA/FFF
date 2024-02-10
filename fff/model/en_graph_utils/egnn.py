@@ -1466,6 +1466,104 @@ def _norm_no_nan(x, axis=-1, keepdims=False, eps=1e-8, sqrt=True):
     out = torch.clamp(torch.sum(torch.square(x), axis, keepdims), min=eps)
     return torch.sqrt(out) if sqrt else out
 
+    
+class LinearFullyConnectedDotProductLayer(nn.Module):
+    def __init__(self, in_vec_dims, hidden_vec_dims, out_scalar_dims, residual=False):
+        super().__init__()
+        self.linear_left = nn.Linear(in_vec_dims, hidden_vec_dims, bias=False)
+        self.linear_right = nn.Linear(in_vec_dims, hidden_vec_dims, bias=False)
+        self.linear_out = nn.Linear(hidden_vec_dims, out_scalar_dims)
+        self.residual = residual 
+
+    def forward(self, vec):
+        # normalization
+        vec_right = self.linear_right(vec)
+        vec_left = self.linear_left(vec)
+        # dot product
+        dot = (vec_left * vec_right).sum(dim=1)
+
+        if self.residual:
+            vec_norm = _norm_no_nan(vec, axis=-2, keepdims=True)
+            dot += vec_norm
+        dot = self.linear_out(dot)
+        return dot
+
+
+class GVPLinear(nn.Module):
+    """
+    Geometric Vector Perceptron. See manuscript and README.md
+    for more details.
+
+    :param in_dims: tuple (n_scalar, n_vector)
+    :param out_dims: tuple (n_scalar, n_vector)
+    :param h_dim: intermediate number of vector channels, optional
+    :param activations: tuple of functions (scalar_act, vector_act)
+    :param vector_gate: whether to use vector gating.
+                        (vector_act will be used as sigma^+ in vector gating if `True`)
+    """
+
+    def __init__(
+        self,
+        in_dims,
+        out_dims,
+        h_dim=None,
+        activations=(F.relu, torch.sigmoid),
+        vector_gate=False,
+        dropout=0.,
+    ):
+        super().__init__()
+        self.si, self.vi = in_dims
+        self.so, self.vo = out_dims
+        self.vector_gate = vector_gate
+        if self.vi:
+            self.h_dim = h_dim or max(self.vi, self.vo)
+            self.dot_prod = LinearFullyConnectedDotProductLayer(self.vi, self.h_dim, self.h_dim)
+            self.wh = nn.Linear(self.vi, self.h_dim, bias=False)
+            self.ws = nn.Linear(self.h_dim + self.si, self.so)
+            if self.vo:
+                self.wv = nn.Linear(self.h_dim, self.vo, bias=False)
+                if self.vector_gate:
+                    self.wsv = nn.Linear(self.so, self.vo)
+        else:
+            self.ws = nn.Linear(self.si, self.so)
+        self.dropout = nn.Dropout(p=dropout)
+        self.scalar_act, self.vector_act = activations
+        self.dummy_param = nn.Parameter(torch.empty(0))
+
+    def forward(self, x):
+        """
+        :param x: tuple (s, V) of `torch.Tensor`,
+                  or (if vectors_in is 0), a single `torch.Tensor`
+        :return: tuple (s, V) of `torch.Tensor`,
+                 or (if vectors_out is 0), a single `torch.Tensor`
+        """
+        if self.vi:
+            s, v = x
+            v = torch.transpose(v, -1, -2)
+            vd = self.dot_prod(v)
+            s = self.ws(torch.cat([s, vd], -1))
+            vh = self.wh(v)
+            if self.vo:
+                v = self.wv(vh)
+                v = torch.transpose(v, -1, -2)
+                if self.vector_gate:
+                    if self.vector_act:
+                        gate = self.wsv(self.vector_act(s))
+                    else:
+                        gate = self.wsv(s)
+                    v = v * torch.sigmoid(gate).unsqueeze(-1)
+                elif self.vector_act:
+                    v = v * self.vector_act(_norm_no_nan(v, axis=-1, keepdims=True))
+        else:
+            s = self.ws(x)
+            if self.vo:
+                v = torch.zeros(s.shape[0], self.vo, 5, device=self.dummy_param.device)
+        if self.scalar_act:
+            s = self.scalar_act(s)
+            s = self.dropout(s)
+
+        return (s, v) if self.vo else s
+
 class GVPLayerNorm(nn.Module):
     '''
     Combined LayerNorm for tuples (s, V).
@@ -1488,104 +1586,36 @@ class GVPLayerNorm(nn.Module):
         vn = _norm_no_nan(v, axis=-1, keepdims=True, sqrt=False)
         vn = torch.sqrt(torch.mean(vn, dim=-2, keepdim=True))
         return self.scalar_norm(s), v / vn
-    
-class GVPLinear(nn.Module):
-    """
-    Geometric Vector Perceptron. See manuscript and README.md
-    for more details.
 
-    :param in_dims: tuple (n_scalar, n_vector)
-    :param out_dims: tuple (n_scalar, n_vector)
-    :param h_dim: intermediate number of vector channels, optional
-    :param activations: tuple of functions (scalar_act, vector_act)
-    :param vector_gate: whether to use vector gating.
-                        (vector_act will be used as sigma^+ in vector gating if `True`)
-    """
-
-    def __init__(
-        self,
-        in_dims,
-        out_dims,
-        h_dim=None,
-        activations=(F.relu, torch.sigmoid),
-        vector_gate=False,
-    ):
-        super().__init__()
-        self.si, self.vi = in_dims
-        self.so, self.vo = out_dims
-        self.vector_gate = vector_gate
-        if self.vi:
-            self.h_dim = h_dim or max(self.vi, self.vo)
-            self.wh = nn.Linear(self.vi, self.h_dim, bias=False)
-            self.ws = nn.Linear(self.h_dim + self.si, self.so)
-            if self.vo:
-                self.wv = nn.Linear(self.h_dim, self.vo, bias=False)
-                if self.vector_gate:
-                    self.wsv = nn.Linear(self.so, self.vo)
-        else:
-            self.ws = nn.Linear(self.si, self.so)
-
-        self.scalar_act, self.vector_act = activations
-        self.dummy_param = nn.Parameter(torch.empty(0))
-
-    def forward(self, x):
-        """
-        :param x: tuple (s, V) of `torch.Tensor`,
-                  or (if vectors_in is 0), a single `torch.Tensor`
-        :return: tuple (s, V) of `torch.Tensor`,
-                 or (if vectors_out is 0), a single `torch.Tensor`
-        """
-        if self.vi:
-            s, v = x
-            v = torch.transpose(v, -1, -2)
-            vh = self.wh(v)
-            vn = _norm_no_nan(vh, axis=-2)
-            s = self.ws(torch.cat([s, vn], -1))
-            if self.vo:
-                v = self.wv(vh)
-                v = torch.transpose(v, -1, -2)
-                if self.vector_gate:
-                    if self.vector_act:
-                        gate = self.wsv(self.vector_act(s))
-                    else:
-                        gate = self.wsv(s)
-                    v = v * torch.sigmoid(gate).unsqueeze(-1)
-                elif self.vector_act:
-                    v = v * self.vector_act(_norm_no_nan(v, axis=-1, keepdims=True))
-        else:
-            s = self.ws(x)
-            if self.vo:
-                v = torch.zeros(s.shape[0], self.vo, 3, device=self.dummy_param.device)
-        if self.scalar_act:
-            s = self.scalar_act(s)
-
-        return (s, v) if self.vo else s
-    
 
 class GVPMPNN(nn.Module):
     def __init__(
         self,
         in_features_v,
         in_features_s,
-        hidden_features_s,
         hidden_features_v,
+        hidden_features_s,
         out_features_v,
-        out_features_s
+        out_features_s,
+        dropout=0.5,
     ):
         super().__init__()
-
         self.edge_model = nn.Sequential(
             GVPLinear(
                         (in_features_s*2, in_features_v*2),
                         (hidden_features_s, hidden_features_v),
+                        vector_gate=True,
+                        dropout=dropout
                     ),
             GVPLayerNorm((hidden_features_s, hidden_features_v))
         )
-            
+
         self.node_model = nn.Sequential(
             GVPLinear(
                         (hidden_features_s*2, hidden_features_v*2),
                         (out_features_s, out_features_v),
+                        vector_gate=True,
+                        dropout=dropout,
                     ),
             GVPLayerNorm((hidden_features_s, hidden_features_v))
         )
@@ -1622,22 +1652,25 @@ class GVPMPNN(nn.Module):
             s_msg = s_msg * edge_mask
             v_msg = (v_msg.reshape(v_msg.shape[0], -1) * edge_mask).reshape(v_msg.shape[0], -1, 3)
         h_msg = (s_msg, v_msg)
+
         h_msg_s = global_add_pool(h_msg[0], edge_index[1])
         h_msg_v = global_add_pool(h_msg[1].reshape(h_msg[1].shape[0], -1), edge_index[1])
         h_msg_v = h_msg_v.reshape(h_msg_v.shape[0], -1, 3)
         h_agg = (h_msg_s, h_msg_v)
+
         out_s, out_v = self.update(h_agg, input)
         if node_mask is not None:
             out_s = out_s * node_mask
             out_v = (out_v.reshape(out_v.shape[0], -1) * node_mask).reshape(out_v.shape[0], -1, 3)
         out_h = (out_s, out_v)
+
         return out_h
 
 
-class EGNN_GVP(nn.Module):
+class  EGNN_GVP(nn.Module):
     def __init__(self, in_node_nf, in_edge_nf, hidden_nf, hidden_nvf=32, device='cpu', act_fn=nn.SiLU(), n_layers=3, attention=False,
                  norm_diff=True, out_node_nf=None, tanh=False, coords_range=15, norm_constant=1, inv_sublayers=2,
-                 sin_embedding=False, normalization_factor=100, aggregation_method='sum'):
+                 sin_embedding=False, normalization_factor=100, aggregation_method='sum', dropout=0):
         super().__init__()
         if out_node_nf is None:
             out_node_nf = in_node_nf
@@ -1646,6 +1679,8 @@ class EGNN_GVP(nn.Module):
                 (in_node_nf, 1),
                 (hidden_nf, hidden_nvf),
                 activations=(None, None),
+                vector_gate=True,
+                dropout=dropout
             ),
             GVPLayerNorm((hidden_nf, hidden_nvf))
         )
@@ -1653,12 +1688,14 @@ class EGNN_GVP(nn.Module):
         layers = []
         for i in range(n_layers):
             layers.append(
-                GVPMPNN(hidden_nvf, hidden_nf, hidden_nf, hidden_nvf, hidden_nvf, hidden_nf)
+                GVPMPNN(hidden_nvf, hidden_nf, hidden_nvf, hidden_nf, hidden_nvf, hidden_nf, dropout=dropout)
             )
         self.projection = GVPLinear(
                 (hidden_nf, hidden_nvf),
                 (out_node_nf, 1),
                 activations=(None, None),
+                vector_gate=True,
+                dropout=dropout,
             )
 
         self.model = nn.Sequential(*layers)
@@ -1675,9 +1712,8 @@ class EGNN_GVP(nn.Module):
     
     def forward(self, h, x, edge_index, node_mask=None, edge_mask=None):
         x_mean = x.mean(dim=0, keepdim=True)
-        x = x - x_mean
-
-        h, pos = self._forward((h, x.unsqueeze(1)), edge_index, node_mask, edge_mask)
+        input = x - x_mean
+        h, pos = self._forward((h, input.unsqueeze(1)), edge_index, node_mask, edge_mask)
         pos = pos.squeeze() + x_mean
 
         return h, pos

@@ -31,7 +31,7 @@ class EGNN_dynamics_QM9(nn.Module):
                 aggregation_method=aggregation_method)
             self.egnn = EGNN_GVP(
                 in_node_nf=h_dim, in_edge_nf=1,
-                hidden_nf=hidden_nf, device=device, act_fn=act_fn,
+                hidden_nf=128, device=device, act_fn=act_fn,
                 n_layers=n_layers, attention=attention, tanh=tanh, norm_constant=norm_constant,
                 inv_sublayers=inv_sublayers, sin_embedding=sin_embedding,
                 normalization_factor=normalization_factor,
